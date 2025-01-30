@@ -19,9 +19,23 @@ spec:
         app: wordpress
         tier: mysql
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/worker
+                operator: Exists
       containers:
       - name: mysql
         image: mysql:8.0
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
         env:
         - name: MYSQL_ROOT_PASSWORD
           valueFrom:

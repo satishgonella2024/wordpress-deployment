@@ -19,9 +19,23 @@ spec:
         app: wordpress
         tier: frontend
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/worker
+                operator: Exists
       containers:
       - name: wordpress
         image: wordpress:6.4.3-apache
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
         env:
         - name: WORDPRESS_DB_HOST
           value: wordpress-mysql
