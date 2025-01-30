@@ -1,67 +1,147 @@
-apiVersion: batch/v1
-kind: Job
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: wordpress-init
+  name: wordpress
   namespace: wordpress
+  labels:
+    app: wordpress
+    tier: frontend
 spec:
+  selector:
+    matchLabels:
+      app: wordpress
+      tier: frontend
+  strategy:
+    type: Recreate
   template:
+    metadata:
+      labels:
+        app: wordpress
+        tier: frontend
     spec:
-      containers:
-      - name: wp-cli
-        image: wordpress:cli
+      initContainers:
+      - name: wordpress-init
+        image: wordpress:6.4.3-apache
         command: ["/bin/sh", "-c"]
         args:
         - |
-          # Wait for WordPress to be ready
-          until wp core is-installed --path=/var/www/html --allow-root; do echo "Waiting for WordPress installation..."; sleep 5; done
+          # Wait for MySQL to be ready
+          until mysqladmin ping -h"$WORDPRESS_DB_HOST" -u"$WORDPRESS_DB_USER" -p"$WORDPRESS_DB_PASSWORD"; do
+            echo "Waiting for MySQL to be ready..."
+            sleep 2
+          done
           
-          # Configure WordPress
+          # Check if wp-config.php exists
+          if [ ! -f /var/www/html/wp-config.php ]; then
+            # Copy WordPress files if not present
+            cp -r /usr/src/wordpress/* /var/www/html/
+            chown -R www-data:www-data /var/www/html
+          fi
+          
+          # Create wp-config.php if it doesn't exist
+          if [ ! -f /var/www/html/wp-config.php ]; then
+            # Generate wp-config.php
+            envsubst < /usr/src/wordpress/wp-config-sample.php > /var/www/html/wp-config.php
+            chown www-data:www-data /var/www/html/wp-config.php
+          fi
+          
+          # Install PHP mysqli extension
+          docker-php-ext-install mysqli
+          
+          # Start Apache in background
+          apache2-foreground &
+          
+          # Wait for WordPress to be accessible
+          until curl -s http://localhost > /dev/null; do
+            echo "Waiting for WordPress to start..."
+            sleep 2
+          done
+          
+          # Download and install wp-cli
+          curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          chmod +x wp-cli.phar
+          mv wp-cli.phar /usr/local/bin/wp
+          
+          # Run WordPress installation
           wp core install \
             --path=/var/www/html \
-            --url=http://$(kubectl get svc wordpress -n wordpress -o jsonpath='{.status.loadBalancer.ingress[0].ip}') \
+            --url="http://192.168.5.241" \
             --title='My WordPress Site' \
             --admin_user=admin \
             --admin_password=admin@123 \
             --admin_email=admin@example.com \
-            --allow-root
+            --skip-email \
+            --allow-root || true
+            
+          # Configure WordPress
+          wp option update permalink_structure '/%postname%/' --allow-root || true
+          wp option update blogdescription 'My WordPress Description' --allow-root || true
           
-          # Update permalink structure
-          wp option update permalink_structure '/%postname%/' --allow-root
-          
-          # Install and activate essential plugins
-          wp plugin install \
-            wordpress-seo \
-            wordfence \
-            w3-total-cache \
-            --activate --allow-root
-          
-          # Configure basic settings
-          wp option update blogdescription 'My WordPress Description' --allow-root
-          wp option update timezone_string 'America/New_York' --allow-root
-          wp option update blog_public 1 --allow-root
-          
-          # Create sample pages
-          wp post create --post_type=page \
+          # Create home page
+          wp post create \
+            --post_type=page \
             --post_title='Home' \
             --post_status=publish \
             --post_content='Welcome to our website!' \
-            --allow-root
-          
-          wp post create --post_type=page \
-            --post_title='About Us' \
-            --post_status=publish \
-            --post_content='Learn more about us.' \
-            --allow-root
-          
-          # Set homepage
-          wp option update show_on_front 'page' --allow-root
-          wp option update page_on_front $(wp post list --post_type=page --post_status=publish --posts_per_page=1 --pagename=home --format=ids --allow-root) --allow-root
+            --allow-root || true
+            
+          echo "WordPress initialization completed!"
+        env:
+        - name: WORDPRESS_DB_HOST
+          value: wordpress-mysql
+        - name: WORDPRESS_DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_USER
+        - name: WORDPRESS_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_PASSWORD
+        - name: WORDPRESS_DB_NAME
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_DATABASE
         volumeMounts:
-        - name: wordpress-data
+        - name: wordpress-persistent-storage
           mountPath: /var/www/html
+      containers:
+      - name: wordpress
+        image: wordpress:6.4.3-apache
+        env:
+        - name: WORDPRESS_DB_HOST
+          value: wordpress-mysql
+        - name: WORDPRESS_DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_USER
+        - name: WORDPRESS_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_PASSWORD
+        - name: WORDPRESS_DB_NAME
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_DATABASE
+        ports:
+        - containerPort: 80
+          name: wordpress
+        volumeMounts:
+        - name: wordpress-persistent-storage
+          mountPath: /var/www/html
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
       volumes:
-      - name: wordpress-data
+      - name: wordpress-persistent-storage
         persistentVolumeClaim:
           claimName: wordpress-pvc
-      restartPolicy: Never
-  backoffLimit: 4
